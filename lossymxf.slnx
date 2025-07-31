@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/root/">
+    <File Path="README.md" />
+  </Folder>
+  <Project Path="Common\Common.csproj" Type="Classic C#" />
+  <Project Path="lossymxf\lossymxf.csproj" Type="Classic C#" />
+  <Project Path="TheBasicFileStreamVersion\TheBasicFileStreamVersion.csproj" Type="Classic C#" />
+</Solution>
