@@ -7,6 +7,14 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
 
+    <PropertyGroup Condition="'$(Configuration)'=='Release'">
+      <PublishAot>True</PublishAot>
+      <TrimmerSingleWarn>false</TrimmerSingleWarn>
+      <DebugSymbols>False</DebugSymbols>
+      <DebugType>None</DebugType>
+      <TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
+    </PropertyGroup>
+
     <ItemGroup>
       <ProjectReference Include="..\TheBasicFileStreamVersion\TheBasicFileStreamVersion.csproj" />
     </ItemGroup>
