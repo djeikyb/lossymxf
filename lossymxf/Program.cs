@@ -1,11 +1,16 @@
 ﻿using System.Diagnostics;
+using System.IO.Compression;
 using Kokuban;
 using TheBasicFileStreamVersion;
 
+// ReSharper disable InconsistentNaming
+
 namespace lossymxf;
 
-class Program
+static class Program
 {
+    const string Reset = "\x1b[0m";
+
     static string Usage()
     {
         return $"""
@@ -156,29 +161,53 @@ class Program
 
         var src = new DirectoryInfo(pathSrc);
 
-        const string reset = "\x1b[0m";
+        using (IStrat strat = Path.GetExtension(pathDst) switch
+               {
+                   ".zip" => new ZipStrat(verbose, dryrun, pathSrc, pathDst),
+                   _ => new CopyStrat(verbose, dryrun, pathSrc, pathDst),
+               })
+        {
+            foreach (var info in src.EnumerateFileSystemInfos("*", options))
+            {
+                int code;
+                if ((code = strat.Receive(info)) != 0)
+                {
+                    return code;
+                }
+            }
+        }
 
-        foreach (var info in src.EnumerateFileSystemInfos("*", options))
+        return 0;
+    }
+
+    public interface IStrat : IDisposable
+    {
+        int Receive(FileSystemInfo info);
+    }
+
+    internal class CopyStrat(bool verbose, bool dryrun, string pathSrc, string pathDst) : IStrat
+    {
+        public int Receive(FileSystemInfo info)
         {
             var rpath = Path.GetRelativePath(pathSrc, info.FullName);
             var mpath = Path.Combine(pathDst, rpath);
 
             if (info.Attributes.HasFlag(FileAttributes.Directory))
             {
-                if (verbose) Console.WriteLine(Chalk.Blue + "D:" + reset + $" {mpath}");
-                if (dryrun) continue;
+                if (verbose) Console.WriteLine(Chalk.Blue + "D:" + Reset + $" {mpath}");
+                if (dryrun) return 0;
 
                 Directory.CreateDirectory(mpath);
 
-                continue;
+                return 0;
             }
 
             switch (info.Extension)
             {
                 case ".mxf":
                 {
-                    if (verbose) Console.WriteLine(Chalk.BrightBlue + "M:" + reset + $" {mpath}");
-                    if (dryrun) continue;
+                    if (verbose) Console.WriteLine(Chalk.BrightBlue + "M:" + Reset + $" {mpath}");
+                    if (dryrun) return 0;
 
                     try
                     {
@@ -196,8 +225,8 @@ class Program
                 default:
                 {
                     // regular files
-                    if (verbose) Console.WriteLine(Chalk.Dim.BrightWhite + "R:" + $"{reset} {mpath}");
-                    if (dryrun) continue;
+                    if (verbose) Console.WriteLine(Chalk.Dim.BrightWhite + "R:" + $"{Reset} {mpath}");
+                    if (dryrun) return 0;
 
                     try
                     {
@@ -213,8 +242,119 @@ class Program
                     break;
                 }
             }
+
+            return 0;
         }
 
-        return 0;
+        public void Dispose()
+        {
+            // TODO release managed resources here
+        }
+    }
+
+    internal class ZipStrat : IStrat
+    {
+
+        private static readonly FileStreamOptions r_fileStreamOptions = new FileStreamOptions
+        {
+            Mode = FileMode.Open,
+            Access = FileAccess.Read,
+            Share = FileShare.Read,
+            BufferSize = Lossy.bufferSize,
+            Options = FileOptions.SequentialScan,
+        };
+
+        private readonly bool _verbose;
+        private readonly bool _dryrun;
+        private readonly string _pathSrc;
+        private readonly string _pathDst;
+        private readonly FileStream _zipStream;
+        private readonly ZipArchive _zip;
+
+        public ZipStrat(bool verbose, bool dryrun, string pathSrc, string pathDst)
+        {
+            _verbose = verbose;
+            _dryrun = dryrun;
+            _pathSrc = pathSrc;
+            _pathDst = pathDst;
+
+            _zipStream = new FileStream(_pathDst, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 1024 * 8,
+                FileOptions.WriteThrough);
+            _zip = new ZipArchive(_zipStream, ZipArchiveMode.Create, leaveOpen: true);
+        }
+
+        public int Receive(FileSystemInfo info)
+        {
+            var rpath = Path.GetRelativePath(_pathSrc, info.FullName);
+            var mpath = Path.Combine(_pathDst, rpath);
+
+            switch (info.Attributes.HasFlag(FileAttributes.Directory), info.Extension)
+            {
+                case (true, _): // directories
+                {
+                    break;
+                    // if (verbose) Console.WriteLine(Chalk.Blue + "D:" + reset + $" {rpath}");
+                    // if (dryrun) break;
+                    // break;
+                }
+
+                case (false, ".mxf"): // mxf files
+                {
+                    if (_verbose) Console.WriteLine(Chalk.BrightBlue + "M:" + Reset + $" {rpath}");
+                    if (_dryrun) return 0;
+
+                    try
+                    {
+                        var zipEntry = _zip.CreateEntry($"{rpath}", CompressionLevel.Optimal);
+                        using (var entryStream = zipEntry.Open())
+                        {
+                            Lossy.Copy(info.FullName, entryStream);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Console.Error.WriteLine(
+                            $"Error compressing or copying mxf.\nsrc: {info.FullName}\ndst: {mpath}\n{e}");
+                    }
+
+                    break;
+                }
+
+                default: // other files (not directories)
+                {
+                    // regular files
+                    if (_verbose) Console.WriteLine(Chalk.Dim.BrightWhite + "R:" + $"{Reset} {rpath}");
+                    if (_dryrun) return 0;
+
+                    try
+                    {
+                        var zipEntry = _zip.CreateEntry($"{rpath}", CompressionLevel.Optimal);
+                        using var entryStream = zipEntry.Open();
+                        using (var fs = new FileStream(info.FullName, r_fileStreamOptions))
+                        {
+                            fs.CopyTo(entryStream);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Console.Error.WriteLine(
+                            $"Error copying regular file.\nsrc: {info.FullName}\ndst: {mpath}\n{e}");
+                        return 1;
+                    }
+
+                    break;
+                }
+            }
+
+            return 0;
+        }
+
+        public void Dispose()
+        {
+            _zip.Dispose();
+            _zipStream.Flush();
+            _zipStream.Close();
+            _zipStream.Dispose();
+        }
     }
 }

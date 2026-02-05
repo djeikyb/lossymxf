@@ -17,12 +17,10 @@ public class Lossy
     private static readonly Ul Ul_ClosedBodyPartition = new Ul("urn:smpte:ul:060e2b34.027f0101.0d010201.01030400");
     private static readonly Ul Ul_Rip = new Ul("urn:smpte:ul:060E2B34.02050101.0D010201.01110100");
 
-    const int bufferSize = 16 * 1024;
+    public const int bufferSize = 16 * 1024;
 
     public static void Copy(string pathMxf, string pathDst)
     {
-        using var fsRead = new FileStream(pathMxf, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize,
-            FileOptions.RandomAccess);
 
         FileStream fsWrite;
         if (File.Exists(pathDst))
@@ -31,6 +29,14 @@ public class Lossy
         else
             fsWrite = new FileStream(pathDst, FileMode.Create, FileAccess.Write, FileShare.Read, bufferSize,
                 FileOptions.WriteThrough);
+
+        Copy(pathMxf, fsWrite);
+    }
+
+    public static void Copy(string pathMxf, Stream fsWrite)
+    {
+        using var fsRead = new FileStream(pathMxf, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize,
+            FileOptions.RandomAccess);
 
         using var _ = fsWrite;
 
