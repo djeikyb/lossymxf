@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using Kokuban;
 using TheBasicFileStreamVersion;
 
 namespace lossymxf;
@@ -155,6 +156,8 @@ class Program
 
         var src = new DirectoryInfo(pathSrc);
 
+        const string reset = "\x1b[0m";
+
         foreach (var info in src.EnumerateFileSystemInfos("*", options))
         {
             var rpath = Path.GetRelativePath(pathSrc, info.FullName);
@@ -162,7 +165,7 @@ class Program
 
             if (info.Attributes.HasFlag(FileAttributes.Directory))
             {
-                if (verbose) Console.WriteLine($"D: {mpath}");
+                if (verbose) Console.WriteLine(Chalk.Blue + "D:" + reset + $" {mpath}");
                 if (dryrun) continue;
 
                 Directory.CreateDirectory(mpath);
@@ -174,7 +177,7 @@ class Program
             {
                 case ".mxf":
                 {
-                    if (verbose) Console.WriteLine($"M: {mpath}");
+                    if (verbose) Console.WriteLine(Chalk.BrightBlue + "M:" + reset + $" {mpath}");
                     if (dryrun) continue;
 
                     try
@@ -192,7 +195,8 @@ class Program
 
                 default:
                 {
-                    if (verbose) Console.WriteLine($"F: {mpath}");
+                    // regular files
+                    if (verbose) Console.WriteLine(Chalk.Dim.BrightWhite + "R:" + $"{reset} {mpath}");
                     if (dryrun) continue;
 
                     try
