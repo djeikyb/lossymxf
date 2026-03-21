@@ -1,22 +1,35 @@
 ﻿using System.Buffers.Binary;
 using Common;
 
+// ReSharper disable InconsistentNaming
+
 namespace TheBasicFileStreamVersion;
+
+public class Op1aException : Exception
+{
+    public Op1aException(string? msg = null, Exception? inner = null) : base(msg, inner)
+    {
+    }
+}
 
 public class Lossy
 {
+    private static readonly Ul Ul_ClosedBodyPartition = new Ul("urn:smpte:ul:060e2b34.027f0101.0d010201.01030400");
+    private static readonly Ul Ul_Rip = new Ul("urn:smpte:ul:060E2B34.02050101.0D010201.01110100");
+
+    const int bufferSize = 16 * 1024;
+
     public static void Copy(string pathMxf, string pathDst)
     {
-        var fsReadBufferSize = 16 * 1024;
-        using var fsRead = new FileStream(pathMxf, FileMode.Open, FileAccess.Read, FileShare.Read, fsReadBufferSize,
+        using var fsRead = new FileStream(pathMxf, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize,
             FileOptions.RandomAccess);
 
         FileStream fsWrite;
         if (File.Exists(pathDst))
-            fsWrite = new FileStream(pathDst, FileMode.Truncate, FileAccess.Write, FileShare.Read, fsReadBufferSize,
+            fsWrite = new FileStream(pathDst, FileMode.Truncate, FileAccess.Write, FileShare.Read, bufferSize,
                 FileOptions.WriteThrough);
         else
-            fsWrite = new FileStream(pathDst, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, fsReadBufferSize,
+            fsWrite = new FileStream(pathDst, FileMode.Create, FileAccess.Write, FileShare.Read, bufferSize,
                 FileOptions.WriteThrough);
 
         using var _ = fsWrite;
@@ -33,19 +46,18 @@ public class Lossy
 
 
         fsRead.ReadExactly(buf16); // key
-        var ul_rip = new Ul("urn:smpte:ul:060E2B34.02050101.0D010201.01110100");
-        if (!ul_rip.Equals(buf16))
+        if (!Ul_Rip.Equals(buf16))
         {
-            throw new Exception($"Failed to find RIP for {pathMxf}.");
+            throw new Op1aException($"Failed to find RIP for {pathMxf}.");
         }
 
-        var klv_len = Asn1Ber.DecodeLength(fsRead);
+        var len = Asn1Ber.DecodeLength(fsRead);
 
         // find where the body starts
         long bodyoffset = 0;
         var readRip = 0;
         long lastPartition = 0;
-        while (readRip < (klv_len - 4)) // -4 to skip last rip property: final length
+        while (readRip < (len - 4)) // -4 to skip last rip property: final length
         {
             fsRead.ReadExactly(buf4);
             readRip += 4;
@@ -63,43 +75,113 @@ public class Lossy
             }
         }
 
-        if (bodyoffset == 0) throw new Exception("No body partition found in RIP.");
+        if (bodyoffset == 0) throw new Op1aException("No body partition found in RIP.");
 
-        // copy header to body
+        Span<byte> buf = stackalloc byte[bufferSize];
+
+
+        // copy header to dst
         long copied = 0;
         fsRead.Seek(0, SeekOrigin.Begin);
 
-        var mod = bodyoffset % fsReadBufferSize;
+        var mod = bodyoffset % bufferSize;
         var justBeforeLastLittleBit = bodyoffset - mod;
-        Span<byte> buf = stackalloc byte[fsReadBufferSize];
         while (copied < justBeforeLastLittleBit)
         {
             fsRead.ReadExactly(buf);
             fsWrite.Write(buf);
-            copied += fsReadBufferSize;
+            copied += bufferSize;
         }
 
-        fsRead.ReadExactly(buf.Slice(0, checked((int)mod)));
+        var lastLittleBit = buf.Slice(0, checked((int)mod));
+        fsRead.ReadExactly(lastLittleBit);
+        fsWrite.Write(lastLittleBit);
 
-        // copy body key
+
+        // next should be the BODY PARTITION
+        fsRead.ReadExactly(buf16);
+        if (!Ul_ClosedBodyPartition.Equals(buf16))
+            throw new Op1aException($"Expected body partition pack, got {Ul.ToUrn(buf16)}. Pos {fsRead.Position}.");
+
+        // write body partition key
+        fsWrite.Write(buf16);
+
+        // r/w body partition length
+        len = Asn1Ber.DecodeLength(fsRead);
+        switch (len)
+        {
+            case > int.MaxValue:
+                throw new NotImplementedException("Long length is (too) long.");
+            case > 0xffffff:
+                throw new NotImplementedException("Body partition pack length oughtta be < 0xffffff aka L=0x83");
+            case > bufferSize:
+                throw new Op1aException($"Expected body partition pack ({len}) to fit in the read buffer ({buf.Length}).");
+            default:
+                BinaryPrimitives.WriteInt32BigEndian(buf16, (int)len);
+                fsWrite.Write([0x83]); // signal ber long, three bytes
+                fsWrite.Write(buf16.Slice(1, 3)); // skip first byte, which is just 0x0 anyway
+                break;
+        }
+
+        // r/w write body partition pack
+        {
+            var v = buf.Slice(0, checked((int)len));
+            fsRead.ReadExactly(v);
+            fsWrite.Write(v);
+        }
+
+
+        // now, essence!
+        // we'll copy one triplet with the value zeroed out
+
+
+        // copy essence key!
         fsRead.ReadExactly(buf16);
         fsWrite.Write(buf16);
 
-        // write new body length
-        var valueLength = fsReadBufferSize - 16 - 1 - 4; // buf - key - berlongindicator - len
-        // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-        if (valueLength > 0xffffff)
-            throw new Exception("chopped klv body length must be less than 0xffffff aka three bytes aka ber long 0x83");
-        buf16.Clear();
-        BinaryPrimitives.WriteInt32BigEndian(buf16, valueLength);
+        // r/w essence triplet length
+        len = Asn1Ber.DecodeLength(fsRead);
+        switch (len)
+        {
+            case > int.MaxValue:
+                throw new NotImplementedException("Long length is (too) long.");
+            case > 0xffffff:
+                throw new NotImplementedException("Body partition length oughtta be < 0xffffff aka L=0x83");
+            default:
+                BinaryPrimitives.WriteInt32BigEndian(buf16, (int)len);
+                fsWrite.Write([0x83]); // signal ber long, three bytes
+                fsWrite.Write(buf16.Slice(1, 3)); // skip first byte, which is just 0x0 anyway
+                break;
+        }
 
-        fsWrite.Write([0x83]); // signal ber long, three bytes
-        fsWrite.Write(buf16.Slice(1, 3)); // skip first byte, which is just 0x0 anyway
+        // fill essence value with zeroes
+        if (len <= buf.Length)
+        {
+            var v = buf.Slice(0, checked((int)len));
+            v.Clear();
+            fsWrite.Write(v);
+        }
+        else
+        {
+            buf.Clear();
+            copied = 0;
+            mod = len % bufferSize;
+            justBeforeLastLittleBit = bodyoffset - mod;
+            while (copied < justBeforeLastLittleBit)
+            {
+                fsWrite.Write(buf);
+                copied += buf.Length;
+            }
 
-        // write new body of zeroes
-        var bodyValue = buf.Slice(0, valueLength);
-        bodyValue.Fill(0);
-        fsWrite.Write(bodyValue);
+            if (mod != 0) fsWrite.Write(buf.Slice(0, checked((int)mod)));
+        }
+        fsRead.Position += len;
+
+
+        // proooooooooobably should rewrite the
+        // index table and rip
+        // but for now..
+
 
         // copy everything after the body
         fsRead.Seek(lastPartition, SeekOrigin.Begin);
